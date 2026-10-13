@@ -1,4 +1,3 @@
-"use strict";
 var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
     var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
     if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
@@ -8,30 +7,29 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
 var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.UserService = void 0;
-const common_1 = require("@nestjs/common");
-const luxon_1 = require("luxon");
-const constants_1 = require("../constants");
-const storage_core_1 = require("../cores/storage.core");
-const decorators_1 = require("../decorators");
-const user_preferences_dto_1 = require("../dtos/user-preferences.dto");
-const user_dto_1 = require("../dtos/user.dto");
-const enum_1 = require("../enum");
-const base_service_1 = require("./base.service");
-const user_methods_1 = require("./shared/user-methods");
-const file_1 = require("../utils/file");
-const mime_types_1 = require("../utils/mime-types");
-const preferences_1 = require("../utils/preferences");
-const profile_image_1 = require("../utils/profile-image");
-let UserService = class UserService extends base_service_1.BaseService {
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { DateTime } from 'luxon';
+import { SALT_ROUNDS } from "../constants.js";
+import { StorageCore } from "../cores/storage.core.js";
+import { OnEvent, OnJob } from "../decorators.js";
+import { mapPreferences } from "../dtos/user-preferences.dto.js";
+import { mapUser, mapUserAdmin } from "../dtos/user.dto.js";
+import { CacheControl, JobName, JobStatus, QueueName, StorageFolder, UserMetadataKey } from "../enum.js";
+import { BaseService } from "./base.service.js";
+import { getCalendarHeatmap } from "./shared/user-methods.js";
+import { ImmichFileResponse } from "../utils/file.js";
+import { mimeTypes } from "../utils/mime-types.js";
+import { findOrFail } from "../utils/misc.js";
+import { getPreferences, getPreferencesPartial, mergePreferences } from "../utils/preferences.js";
+import { generateProfileImage } from "../utils/profile-image.js";
+let UserService = class UserService extends BaseService {
     async search(auth) {
     // 1. Fetch the full active user list from the repository
     let users = await this.userRepository.getList({ withDeleted: false });
 
     // 2. Admins bypass all restrictions
     if (auth.user.isAdmin) {
-        return users.map((user) => (0, user_dto_1.mapUser)(user));
+        return users.map((user) => mapUser(user));
     }
 
     // 3. Parse explicit environment variables
@@ -73,7 +71,7 @@ let UserService = class UserService extends base_service_1.BaseService {
     if (isBlind) {
         // Blind users only see themselves
         users = users.filter(u => u.id === auth.user.id);
-        return users.map((user) => (0, user_dto_1.mapUser)(user));
+        return users.map((user) => mapUser(user));
     }
 
     // 6. Apply 'Group' Rule
@@ -84,7 +82,7 @@ let UserService = class UserService extends base_service_1.BaseService {
             const targetEmail = u.email ? u.email.toLowerCase() : '';
             return myGroupedEmails.has(targetEmail);
         });
-        return users.map((user) => (0, user_dto_1.mapUser)(user));
+        return users.map((user) => mapUser(user));
     }
 
     // 7. Apply Standard Rule (For non-blind, non-grouped users)
@@ -103,24 +101,24 @@ let UserService = class UserService extends base_service_1.BaseService {
         return true;
     });
 
-    return users.map((user) => (0, user_dto_1.mapUser)(user));
+    return users.map((user) => mapUser(user));
     }
     async getMe(auth) {
         const user = await this.userRepository.get(auth.user.id, {});
         if (!user) {
-            throw new common_1.BadRequestException('User not found');
+            throw new BadRequestException('User not found');
         }
-        return (0, user_dto_1.mapUserAdmin)(user);
+        return mapUserAdmin(user);
     }
     getCalendarHeatmap(auth, dto) {
-        return (0, user_methods_1.getCalendarHeatmap)(auth.user.id, dto, { asset: this.assetRepository });
+        return getCalendarHeatmap(auth.user.id, dto, { asset: this.assetRepository });
     }
     async updateMe({ user }, dto) {
         if (dto.email) {
             const duplicate = await this.userRepository.getByEmail(dto.email);
             if (duplicate && duplicate.id !== user.id) {
                 this.logger.warn('Email already in use by another account');
-                throw new common_1.BadRequestException('Email is not available');
+                throw new BadRequestException('Email is not available');
             }
         }
         const update = {
@@ -129,47 +127,47 @@ let UserService = class UserService extends base_service_1.BaseService {
             avatarColor: dto.avatarColor,
         };
         if (dto.password) {
-            const hashedPassword = await this.cryptoRepository.hashBcrypt(dto.password, constants_1.SALT_ROUNDS);
+            const hashedPassword = await this.cryptoRepository.hashBcrypt(dto.password, SALT_ROUNDS);
             update.password = hashedPassword;
             update.shouldChangePassword = false;
         }
         const updatedUser = await this.userRepository.update(user.id, update);
-        return (0, user_dto_1.mapUserAdmin)(updatedUser);
+        return mapUserAdmin(updatedUser);
     }
     async getMyPreferences(auth) {
         const metadata = await this.userRepository.getMetadata(auth.user.id);
-        return (0, user_preferences_dto_1.mapPreferences)((0, preferences_1.getPreferences)(metadata));
+        return mapPreferences(getPreferences(metadata));
     }
     async updateMyPreferences(auth, dto) {
         const metadata = await this.userRepository.getMetadata(auth.user.id);
-        const updated = (0, preferences_1.mergePreferences)((0, preferences_1.getPreferences)(metadata), dto);
+        const updated = mergePreferences(getPreferences(metadata), dto);
         await this.userRepository.upsertMetadata(auth.user.id, {
-            key: enum_1.UserMetadataKey.Preferences,
-            value: (0, preferences_1.getPreferencesPartial)(updated),
+            key: UserMetadataKey.Preferences,
+            value: getPreferencesPartial(updated),
         });
-        return (0, user_preferences_dto_1.mapPreferences)(updated);
+        return mapPreferences(updated);
     }
     async get(id) {
         const user = await this.findOrFail(id, { withDeleted: false });
-        return (0, user_dto_1.mapUser)(user);
+        return mapUser(user);
     }
     async createProfileImage(auth, file) {
         const { profileImagePath: oldPath } = await this.findOrFail(auth.user.id, { withDeleted: false });
         let profileImagePath;
         try {
             const config = await this.getConfig({ withCache: true });
-            profileImagePath = await (0, profile_image_1.generateProfileImage)({ media: this.mediaRepository, crypto: this.cryptoRepository, storageCore: this.storageCore }, config, auth.user.id, file.path);
+            profileImagePath = await generateProfileImage({ media: this.mediaRepository, crypto: this.cryptoRepository, storageCore: this.storageCore }, config, auth.user.id, file.path);
         }
         catch (error) {
-            await this.jobRepository.queue({ name: enum_1.JobName.FileDelete, data: { files: [file.path] } });
-            throw new common_1.BadRequestException('Unable to process profile image', { cause: error });
+            await this.jobRepository.queue({ name: JobName.FileDelete, data: { files: [file.path] } });
+            throw new BadRequestException('Unable to process profile image', { cause: error });
         }
         const user = await this.userRepository.update(auth.user.id, {
             profileImagePath,
             profileChangedAt: new Date(),
         });
         const toDelete = [file.path, ...(oldPath ? [oldPath] : [])];
-        await this.jobRepository.queue({ name: enum_1.JobName.FileDelete, data: { files: toDelete } });
+        await this.jobRepository.queue({ name: JobName.FileDelete, data: { files: toDelete } });
         return {
             userId: user.id,
             profileImagePath: user.profileImagePath,
@@ -179,54 +177,54 @@ let UserService = class UserService extends base_service_1.BaseService {
     async deleteProfileImage(auth) {
         const user = await this.findOrFail(auth.user.id, { withDeleted: false });
         if (user.profileImagePath === '') {
-            throw new common_1.BadRequestException("Can't delete a missing profile Image");
+            throw new BadRequestException("Can't delete a missing profile Image");
         }
         await this.userRepository.update(auth.user.id, { profileImagePath: '', profileChangedAt: new Date() });
-        await this.jobRepository.queue({ name: enum_1.JobName.FileDelete, data: { files: [user.profileImagePath] } });
+        await this.jobRepository.queue({ name: JobName.FileDelete, data: { files: [user.profileImagePath] } });
     }
     async getProfileImage(id) {
         const user = await this.userRepository.get(id, {});
         if (!user || !user.profileImagePath) {
             this.logger.debug('User or profile image not found');
-            throw new common_1.NotFoundException();
+            throw new NotFoundException();
         }
-        return new file_1.ImmichFileResponse({
+        return new ImmichFileResponse({
             path: user.profileImagePath,
-            contentType: mime_types_1.mimeTypes.lookup(user.profileImagePath),
-            cacheControl: enum_1.CacheControl.None,
+            contentType: mimeTypes.lookup(user.profileImagePath),
+            cacheControl: CacheControl.None,
         });
     }
     async getLicense(auth) {
         const metadata = await this.userRepository.getMetadata(auth.user.id);
-        const license = metadata.find((item) => item.key === enum_1.UserMetadataKey.License);
+        const license = metadata.find((item) => item.key === UserMetadataKey.License);
         if (!license) {
-            throw new common_1.NotFoundException();
+            throw new NotFoundException();
         }
         return { ...license.value, activatedAt: new Date(license.value.activatedAt) };
     }
     async deleteLicense({ user }) {
-        await this.userRepository.deleteMetadata(user.id, enum_1.UserMetadataKey.License);
+        await this.userRepository.deleteMetadata(user.id, UserMetadataKey.License);
     }
     async setLicense(auth, license) {
         if (!license.licenseKey.startsWith('IMCL-') && !license.licenseKey.startsWith('IMSV-')) {
-            throw new common_1.BadRequestException('Invalid license key');
+            throw new BadRequestException('Invalid license key');
         }
         const { licensePublicKey } = this.configRepository.getEnv();
         const isClientLicenseValid = this.cryptoRepository.verifySha256(license.licenseKey, license.activationKey, licensePublicKey.client);
         const isServerLicenseValid = this.cryptoRepository.verifySha256(license.licenseKey, license.activationKey, licensePublicKey.server);
         if (!isClientLicenseValid && !isServerLicenseValid) {
-            throw new common_1.BadRequestException('Invalid license key');
+            throw new BadRequestException('Invalid license key');
         }
         const activatedAt = new Date();
         await this.userRepository.upsertMetadata(auth.user.id, {
-            key: enum_1.UserMetadataKey.License,
+            key: UserMetadataKey.License,
             value: { ...license, activatedAt: activatedAt.toISOString() },
         });
         return { ...license, activatedAt };
     }
     async getOnboarding(auth) {
         const metadata = await this.userRepository.getMetadata(auth.user.id);
-        const onboardingData = metadata.find((item) => item.key === enum_1.UserMetadataKey.Onboarding)?.value;
+        const onboardingData = metadata.find((item) => item.key === UserMetadataKey.Onboarding)?.value;
         if (!onboardingData) {
             return { isOnboarded: false };
         }
@@ -235,11 +233,11 @@ let UserService = class UserService extends base_service_1.BaseService {
         };
     }
     async deleteOnboarding({ user }) {
-        await this.userRepository.deleteMetadata(user.id, enum_1.UserMetadataKey.Onboarding);
+        await this.userRepository.deleteMetadata(user.id, UserMetadataKey.Onboarding);
     }
     async setOnboarding(auth, onboarding) {
         await this.userRepository.upsertMetadata(auth.user.id, {
-            key: enum_1.UserMetadataKey.Onboarding,
+            key: UserMetadataKey.Onboarding,
             value: {
                 isOnboarded: onboarding.isOnboarded,
             },
@@ -255,13 +253,13 @@ let UserService = class UserService extends base_service_1.BaseService {
     }
     async handleUserSyncUsage() {
         await this.userRepository.syncUsage();
-        return enum_1.JobStatus.Success;
+        return JobStatus.Success;
     }
     async handleUserDeleteCheck() {
         const config = await this.getConfig({ withCache: false });
-        const users = await this.userRepository.getDeletedAfter(luxon_1.DateTime.now().minus({ days: config.user.deleteDelay }));
-        await this.jobRepository.queueAll(users.map((user) => ({ name: enum_1.JobName.UserDelete, data: { id: user.id } })));
-        return enum_1.JobStatus.Success;
+        const users = await this.userRepository.getDeletedAfter(DateTime.now().minus({ days: config.user.deleteDelay }));
+        await this.jobRepository.queueAll(users.map((user) => ({ name: JobName.UserDelete, data: { id: user.id } })));
+        return JobStatus.Success;
     }
     async handleUserDelete({ id, force }) {
         const config = await this.getConfig({ withCache: false });
@@ -275,11 +273,11 @@ let UserService = class UserService extends base_service_1.BaseService {
         }
         this.logger.log(`Deleting user: ${user.id}`);
         const folders = [
-            storage_core_1.StorageCore.getLibraryFolder(user),
-            storage_core_1.StorageCore.getFolderLocation(enum_1.StorageFolder.Upload, user.id),
-            storage_core_1.StorageCore.getFolderLocation(enum_1.StorageFolder.Profile, user.id),
-            storage_core_1.StorageCore.getFolderLocation(enum_1.StorageFolder.Thumbnails, user.id),
-            storage_core_1.StorageCore.getFolderLocation(enum_1.StorageFolder.EncodedVideo, user.id),
+            StorageCore.getLibraryFolder(user),
+            StorageCore.getFolderLocation(StorageFolder.Upload, user.id),
+            StorageCore.getFolderLocation(StorageFolder.Profile, user.id),
+            StorageCore.getFolderLocation(StorageFolder.Thumbnails, user.id),
+            StorageCore.getFolderLocation(StorageFolder.EncodedVideo, user.id),
         ];
         for (const folder of folders) {
             this.logger.warn(`Removing user from filesystem: ${folder}`);
@@ -294,42 +292,38 @@ let UserService = class UserService extends base_service_1.BaseService {
         if (!user.deletedAt) {
             return false;
         }
-        return luxon_1.DateTime.now().minus({ days: delayUntilDeletion }) > luxon_1.DateTime.fromJSDate(user.deletedAt);
+        return DateTime.now().minus({ days: delayUntilDeletion }) > DateTime.fromJSDate(user.deletedAt);
     }
-    async findOrFail(id, options) {
-        const user = await this.userRepository.get(id, options);
-        if (!user) {
-            throw new common_1.BadRequestException('User not found');
-        }
-        return user;
+    findOrFail(id, options) {
+        return findOrFail(() => this.userRepository.get(id, options), 'User');
     }
 };
-exports.UserService = UserService;
 __decorate([
-    (0, decorators_1.OnEvent)({ name: 'AssetCreate' }),
+    OnEvent({ name: 'AssetCreate' }),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Object]),
     __metadata("design:returntype", Promise)
 ], UserService.prototype, "onAssetCreate", null);
 __decorate([
-    (0, decorators_1.OnJob)({ name: enum_1.JobName.UserSyncUsage, queue: enum_1.QueueName.BackgroundTask }),
+    OnJob({ name: JobName.UserSyncUsage, queue: QueueName.BackgroundTask }),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", []),
     __metadata("design:returntype", Promise)
 ], UserService.prototype, "handleUserSyncUsage", null);
 __decorate([
-    (0, decorators_1.OnJob)({ name: enum_1.JobName.UserDeleteCheck, queue: enum_1.QueueName.BackgroundTask }),
+    OnJob({ name: JobName.UserDeleteCheck, queue: QueueName.BackgroundTask }),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", []),
     __metadata("design:returntype", Promise)
 ], UserService.prototype, "handleUserDeleteCheck", null);
 __decorate([
-    (0, decorators_1.OnJob)({ name: enum_1.JobName.UserDelete, queue: enum_1.QueueName.BackgroundTask }),
+    OnJob({ name: JobName.UserDelete, queue: QueueName.BackgroundTask }),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Object]),
     __metadata("design:returntype", Promise)
 ], UserService.prototype, "handleUserDelete", null);
-exports.UserService = UserService = __decorate([
-    (0, common_1.Injectable)()
+UserService = __decorate([
+    Injectable()
 ], UserService);
+export { UserService };
 //# sourceMappingURL=user.service.js.map

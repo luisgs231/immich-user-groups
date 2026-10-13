@@ -1,6 +1,6 @@
 # Immich User Visibility & Groups Hot-Patch
 
-<p align="center"><strong>Tested and working on Immich v3.2.0</strong></p>
+<p align="center"><strong>Built for Immich v3.3.1</strong></p>
 
 A quick, environment variable driven hot patch for [Immich](https://immich.app/) that introduces user groups and strict visibility isolation.
 
